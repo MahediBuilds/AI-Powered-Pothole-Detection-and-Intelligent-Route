@@ -38,3 +38,8 @@ urllib3==2.7.0
 # needed for scripts/10_export_model.py (ONNX export)
 onnx
 onnxslim
+
+# needed for app.py (Part 4 UI backend)
+fastapi
+uvicorn
+python-multipart
