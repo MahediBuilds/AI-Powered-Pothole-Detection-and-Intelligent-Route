@@ -46,7 +46,7 @@ DETECTIONS_JSON = ROOT / "results" / "detections.json"
 SCRIPTS_DIR = ROOT / "scripts"
 
 DEFAULT_FRAME_STRIDE = 5
-DEFAULT_CONF_THRESHOLD = 0.6
+DEFAULT_CONF_THRESHOLD = config.CONF_THRESHOLD  # 0.35 - match the pipeline's validated inference threshold (was 0.6, apparently copied from script 13's unrelated pseudo-labeling threshold)
 
 UPLOADS_DIR.mkdir(exist_ok=True)
 MODELS_DIR.mkdir(exist_ok=True)
@@ -179,7 +179,7 @@ def process_job(job_id, video_path, gps_path, model_path, frame_stride, conf_thr
             "--conf", str(conf_threshold),
         ]
         if gps_path:
-            cmd += ["--geotag", str(gps_path)]
+            cmd += ["--geotag", str(gps_path), "--frames-meta", str(frames_dir / "frames_meta.csv")]
         run_subprocess(cmd, job_id)
         JOBS[job_id]["progress"] = 60
 

@@ -19,9 +19,33 @@ Classification logic:
   Severe   -> large area OR (medium area AND irregular)
   Moderate -> everything else
 
-No ground truth was found in this repo to calibrate against, so the
-thresholds below are the defaults from the project spec. Adjust the
-THRESHOLDS dict below if/when real calibration data becomes available.
+No human-graded ground truth was found in this repo to calibrate against.
+The thresholds below were derived from a dry run of the actual inference
+pipeline (09_infer_seg.py -> this script) against the only real images
+present in the repository: the 99 ground-truth visualization overlays
+under results/segmentation_visualization/{train,val,test} plus the single
+image in test_images/ (100 images, 34 detections at the default confidence
+threshold). That run showed the previous area thresholds (2000 / 6000 px)
+were roughly two orders of magnitude too small for this dataset's actual
+frame resolution (1080x1080, mask_area_px measured in full-frame pixel
+space, not model input space) - 33 of 34 detections were classified
+Severe, which does not discriminate. The area thresholds below are set at
+the 33rd/67th percentile of the measured mask_area_px distribution from
+that run (33rd pct ~= 307,971 px, 67th pct ~= 520,499 px), giving a roughly
+even three-way split on the observed sample. Circularity and aspect-ratio
+were left close to the original spec values, since the dry run showed the
+old cutoffs (25, 2.5) already sit near the median/75th-percentile of the
+observed distribution and discriminate reasonably well as-is; both were
+nudged slightly to better match the measured 75th percentile.
+
+Caveat: this is a same-source-as-original-spec heuristic recalibration
+against N=34 detections drawn from GT-overlay images (the dataset itself
+is absent from this repo), not a fit against human severity grades. Treat
+these as a considerably better starting point than the previous defaults,
+not as validated, production-ready thresholds - re-run
+scripts/09_infer_seg.py + this script against the real dataset (once
+available) and recompute percentiles, or better, calibrate against human
+severity ratings, before relying on this for a real deployment decision.
 """
 
 import argparse
@@ -39,10 +63,10 @@ import config
 # Thresholds - kept as named constants so they're easy to find and adjust.
 # ---------------------------------------------------------------------------
 THRESHOLDS = {
-    "area_small_max": 2000,       # px: area < this -> "small"
-    "area_medium_max": 6000,      # px: small..this -> "medium", above -> "large"
-    "circularity_irregular": 25,  # perimeter^2/area above this -> "irregular"
-    "aspect_ratio_elongated": 2.5,  # max(w,h)/min(w,h) above this -> "elongated"
+    "area_small_max": 308000,     # px: area < this -> "small" (33rd pct of dry-run sample, N=34)
+    "area_medium_max": 520000,    # px: small..this -> "medium", above -> "large" (67th pct)
+    "circularity_irregular": 30,  # perimeter^2/area above this -> "irregular" (~median-to-75th pct)
+    "aspect_ratio_elongated": 2.2,  # max(w,h)/min(w,h) above this -> "elongated" (~75th pct)
 }
 
 
