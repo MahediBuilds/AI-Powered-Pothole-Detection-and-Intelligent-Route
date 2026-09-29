@@ -13,9 +13,21 @@ predictions.json with bbox, confidence, polygon and (if a geotag log is
 supplied via --geotag) interpolated lat/lon. Without --geotag, lat/lon are
 simply null - this is the extension point for the route-mapping feature,
 not a required input right now.
+
+Geotagging here requires a real per-frame timestamp, which this script
+does not know on its own - it only sees a directory of already-extracted
+images, not the original video's fps or frame stride. Pass --frames-meta
+pointing at the frames_meta.csv written by 02_extract_frames.py (or by
+app.py's single-video extraction) to look up each frame's real
+timestamp_sec by filename. Without --frames-meta, --geotag is ignored and
+lat/lon are left null rather than guessed - an earlier version of this
+script estimated timestamp_sec as (list position / assumed 30fps), which
+silently produced wrong coordinates whenever the source video's real fps
+differed from 30 or frames had been extracted at a stride > 1.
 """
 
 import argparse
+import csv
 import json
 import sys
 from pathlib import Path
@@ -48,7 +60,32 @@ def mask_to_polygon(mask_uint8):
     return largest.reshape(-1, 2).tolist()
 
 
-def run(model, image_paths, args, geotag_log, video_stem):
+def load_frame_timestamps(frames_meta_path):
+    """Load {filename: timestamp_sec} from a frames_meta.csv, if given.
+
+    Same lookup 12_build_detections.py uses - kept local here (rather than
+    imported) so this script has no dependency on that one.
+    """
+    if frames_meta_path is None:
+        return {}
+
+    path = Path(frames_meta_path)
+    if not path.exists():
+        print(f"[WARN] --frames-meta path not found: {path}")
+        return {}
+
+    lookup = {}
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                lookup[row["filename"]] = float(row["timestamp_sec"])
+            except (KeyError, ValueError):
+                continue
+    return lookup
+
+
+def run(model, image_paths, args, geotag_log, video_stem, frame_timestamps):
     results_out = []
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -93,9 +130,12 @@ def run(model, image_paths, args, geotag_log, video_stem):
 
                 lat, lon = (None, None)
                 if geotag_log:
-                    fps = 30.0  # assumed; only used when caller passes frame timestamps directly
-                    timestamp_sec = idx / fps
-                    lat, lon = interpolate_position(timestamp_sec, geotag_log)
+                    timestamp_sec = frame_timestamps.get(img_path.name)
+                    if timestamp_sec is not None:
+                        lat, lon = interpolate_position(timestamp_sec, geotag_log)
+                    # else: no real timestamp known for this frame (no
+                    # --frames-meta, or this filename isn't in it) - leave
+                    # lat/lon null rather than guessing one.
 
                 detections.append({
                     "frame": img_path.name,
@@ -125,6 +165,18 @@ def main():
     parser.add_argument("--iou", type=float, default=config.IOU_THRESHOLD)
     parser.add_argument("--tta", action="store_true", help="Enable test-time augmentation")
     parser.add_argument("--geotag", default=None, help="Optional CSV: timestamp_sec,lat,lon")
+    parser.add_argument(
+        "--frames-meta",
+        default=None,
+        help=(
+            "Path to the frames_meta.csv written by 02_extract_frames.py "
+            "(or app.py's single-video extraction), mapping each frame "
+            "filename to its real timestamp_sec. Required for --geotag to "
+            "do anything - without it, lat/lon stay null even if --geotag "
+            "is given, since there is no reliable way to know a frame's "
+            "real timestamp from its filename or position alone."
+        ),
+    )
     args = parser.parse_args()
 
     weights_path = Path(args.weights)
@@ -140,10 +192,18 @@ def main():
     if args.geotag and not geotag_log:
         print(f"[WARN] --geotag given but no rows loaded from {args.geotag}")
 
+    frame_timestamps = load_frame_timestamps(args.frames_meta)
+    if args.geotag and not frame_timestamps:
+        print(
+            "[WARN] --geotag given but no --frames-meta (or it was empty) - "
+            "lat/lon will be null for every detection, since there is no "
+            "real per-frame timestamp to interpolate against."
+        )
+
     model = YOLO(str(weights_path))
 
     print(f"Running inference on {len(image_paths)} images (conf={args.conf}, iou={args.iou}, tta={args.tta})")
-    detections = run(model, image_paths, args, geotag_log, video_stem=source_dir.name)
+    detections = run(model, image_paths, args, geotag_log, video_stem=source_dir.name, frame_timestamps=frame_timestamps)
 
     out_json = Path(args.output) / "predictions.json"
     with open(out_json, "w") as f:

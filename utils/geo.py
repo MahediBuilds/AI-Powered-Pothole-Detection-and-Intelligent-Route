@@ -31,7 +31,10 @@ def load_geotag_log(path):
     with open(path, newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            rows.append((float(row["timestamp_sec"]), float(row["lat"]), float(row["lon"])))
+            try:
+                rows.append((float(row["timestamp_sec"]), float(row["lat"]), float(row["lon"])))
+            except (KeyError, ValueError, TypeError):
+                continue  # malformed/blank row - skip rather than crash the run
 
     rows.sort(key=lambda r: r[0])
     return rows
