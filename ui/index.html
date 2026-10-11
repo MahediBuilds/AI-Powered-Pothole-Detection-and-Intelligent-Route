@@ -1,0 +1,727 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pothole Detection &amp; Route Planner</title>
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
+
+<style>
+  /* ---------------------------------------------------------------------
+     Config variables an operator might want to change - kept at the top.
+     --------------------------------------------------------------------- */
+  :root {
+    --map-center-lat: 12.9716;   /* Bengaluru, India - default map center */
+    --map-center-lon: 77.5946;
+
+    --bg: #f5f6f8;
+    --panel-bg: #ffffff;
+    --text: #1a1d23;
+    --muted: #6b7280;
+    --border: #e2e5ea;
+    --accent: #2563eb;
+    --accent-contrast: #ffffff;
+    --mild: #22c55e;
+    --moderate: #f59e0b;
+    --severe: #ef4444;
+    --console-bg: #0d1117;
+    --console-text: #c9d1d9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14161a;
+      --panel-bg: #1c1f26;
+      --text: #e6e8eb;
+      --muted: #9aa1ab;
+      --border: #2c303a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14161a;
+    --panel-bg: #1c1f26;
+    --text: #e6e8eb;
+    --muted: #9aa1ab;
+    --border: #2c303a;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel-bg);
+  }
+  header h1 { font-size: 18px; margin: 0; }
+  .theme-toggle {
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text);
+    border-radius: 8px;
+    padding: 6px 12px;
+    cursor: pointer;
+  }
+  main {
+    padding: 16px;
+    display: grid;
+    gap: 16px;
+    grid-template-columns: 1fr;
+  }
+  @media (min-width: 1000px) {
+    main { grid-template-columns: 1fr 1fr; }
+    .full-width { grid-column: 1 / -1; }
+  }
+  section.panel {
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  section.panel h2 {
+    margin-top: 0;
+    font-size: 15px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  label { display: block; font-size: 13px; margin: 10px 0 4px; color: var(--muted); }
+  input[type="file"], input[type="text"], input[type="number"], select {
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+  }
+  button.primary {
+    margin-top: 14px;
+    background: var(--accent);
+    color: var(--accent-contrast);
+    border: none;
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  button.secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 8px 14px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .row { display: flex; gap: 12px; }
+  .row > * { flex: 1; }
+
+  .progress-track {
+    height: 10px;
+    border-radius: 6px;
+    background: var(--border);
+    overflow: hidden;
+    margin-top: 12px;
+  }
+  .progress-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--accent);
+    transition: width 0.3s ease;
+  }
+  .console {
+    margin-top: 12px;
+    background: var(--console-bg);
+    color: var(--console-text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    border-radius: 8px;
+    padding: 10px;
+    height: 180px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+  .summary-tiles { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+  .tile {
+    flex: 1;
+    min-width: 90px;
+    border-radius: 8px;
+    padding: 10px;
+    text-align: center;
+    border: 1px solid var(--border);
+  }
+  .tile .n { font-size: 20px; font-weight: 700; }
+  .tile .l { font-size: 11px; color: var(--muted); text-transform: uppercase; }
+  .tile.mild { border-color: var(--mild); }
+  .tile.moderate { border-color: var(--moderate); }
+  .tile.severe { border-color: var(--severe); }
+
+  #map { height: 460px; border-radius: 10px; }
+
+  .filters { display: flex; gap: 16px; margin: 10px 0; align-items: center; flex-wrap: wrap; }
+  .filters label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); margin: 0; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .dot.mild { background: var(--mild); }
+  .dot.moderate { background: var(--moderate); }
+  .dot.severe { background: var(--severe); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; }
+  th { cursor: pointer; color: var(--muted); user-select: none; }
+  tr.detection-row:hover { background: var(--bg); cursor: pointer; }
+  .empty-msg { color: var(--muted); font-size: 14px; padding: 20px 0; text-align: center; }
+
+  .route-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    margin-top: 8px;
+    cursor: pointer;
+  }
+  .route-card small { color: var(--muted); }
+  .swatch { display:inline-block; width:12px; height:12px; border-radius:3px; margin-right:6px; vertical-align:middle; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🕳️ Pothole Detection &amp; Route Planner</h1>
+  <button class="theme-toggle" id="themeToggle">🌓 Toggle theme</button>
+</header>
+
+<main>
+
+  <!-- ================= SECTION 1: VIDEO PROCESSING ================= -->
+  <section class="panel">
+    <h2>1. Video Processing</h2>
+
+    <label>Road video</label>
+    <input type="file" id="videoFile" accept="video/*" />
+
+    <label>GPS log (optional CSV: timestamp_sec,lat,lon)</label>
+    <input type="file" id="gpsFile" accept=".csv" />
+
+    <div class="row">
+      <div>
+        <label>Model</label>
+        <select id="modelSelect"><option>Loading models...</option></select>
+      </div>
+      <div>
+        <label>Frame stride</label>
+        <input type="number" id="frameStride" value="5" min="1" />
+      </div>
+    </div>
+
+    <label>Confidence threshold</label>
+    <input type="number" id="confThreshold" value="0.35" step="0.05" min="0" max="1" />
+
+    <label><input type="checkbox" id="appendMode" style="width:auto;display:inline-block;margin-right:6px;" />Append to existing detections.json (unchecked = overwrite)</label>
+
+    <button class="primary" id="processBtn">▶ Process Video</button>
+
+    <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="console" id="consoleOut">Waiting to start...</div>
+
+    <div class="summary-tiles" id="summaryTiles" style="display:none;">
+      <div class="tile"><div class="n" id="sumTotal">0</div><div class="l">Total</div></div>
+      <div class="tile mild"><div class="n" id="sumMild">0</div><div class="l">Mild</div></div>
+      <div class="tile moderate"><div class="n" id="sumModerate">0</div><div class="l">Moderate</div></div>
+      <div class="tile severe"><div class="n" id="sumSevere">0</div><div class="l">Severe</div></div>
+    </div>
+  </section>
+
+  <!-- ================= SECTION 3: ROUTE PLANNER ================= -->
+  <section class="panel">
+    <h2>3. Route Planner</h2>
+
+    <label>Start (place name or lat,lon)</label>
+    <input type="text" id="routeStart" placeholder="e.g. 12.9716,77.5946" />
+
+    <label>End (place name or lat,lon)</label>
+    <input type="text" id="routeEnd" placeholder="e.g. 12.9352,77.6146" />
+
+    <button class="primary" id="findRoutesBtn">🧭 Find Routes</button>
+
+    <div id="routeResults"></div>
+  </section>
+
+  <!-- ================= SECTION 2: MAP VIEW ================= -->
+  <section class="panel full-width">
+    <h2>2. Map View</h2>
+    <div class="filters">
+      <label><span class="dot mild"></span> <input type="checkbox" id="filterMild" checked /> Mild</label>
+      <label><span class="dot moderate"></span> <input type="checkbox" id="filterModerate" checked /> Moderate</label>
+      <label><span class="dot severe"></span> <input type="checkbox" id="filterSevere" checked /> Severe</label>
+      <button class="secondary" id="loadDetectionsBtn">⟳ Load detections.json</button>
+    </div>
+    <div id="map"></div>
+    <div id="mapEmptyMsg" class="empty-msg" style="display:none;">
+      No detections loaded yet. Process a video, or click "Load detections.json".
+    </div>
+  </section>
+
+  <!-- ================= SECTION 4: DETECTIONS TABLE ================= -->
+  <section class="panel full-width">
+    <h2>4. Detections Table</h2>
+    <button class="secondary" id="exportCsvBtn">⬇ Export CSV</button>
+    <div style="overflow-x:auto; margin-top:10px;">
+      <table id="detTable">
+        <thead>
+          <tr>
+            <th data-key="idx">#</th>
+            <th data-key="timestamp">Timestamp</th>
+            <th data-key="latitude">Latitude</th>
+            <th data-key="longitude">Longitude</th>
+            <th data-key="severity">Severity</th>
+            <th data-key="confidence">Confidence</th>
+            <th data-key="pixel_area">Area (px)</th>
+          </tr>
+        </thead>
+        <tbody id="detTableBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
+<script>
+"use strict";
+
+/* -------------------------------------------------------------------------
+   Config
+   ------------------------------------------------------------------------- */
+const API_BASE = "";  // same origin as the FastAPI backend
+const DEFAULT_CENTER = [12.9716, 77.5946]; // Bengaluru, India
+const SEVERITY_COLORS = { Mild: "#22c55e", Moderate: "#f59e0b", Severe: "#ef4444" };
+const AVOID_RADIUS_METERS = 20;
+
+/* -------------------------------------------------------------------------
+   Theme toggle (per-viewer convenience only -> localStorage is fine here)
+   ------------------------------------------------------------------------- */
+(function initTheme() {
+  try {
+    const saved = localStorage.getItem("pothole-ui-theme");
+    if (saved) document.documentElement.setAttribute("data-theme", saved);
+  } catch (e) { /* private browsing etc. - ignore */ }
+})();
+document.getElementById("themeToggle").addEventListener("click", () => {
+  const current = document.documentElement.getAttribute("data-theme") ||
+    (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  const next = current === "dark" ? "light" : "dark";
+  document.documentElement.setAttribute("data-theme", next);
+  try { localStorage.setItem("pothole-ui-theme", next); } catch (e) {}
+});
+
+/* -------------------------------------------------------------------------
+   Map setup
+   ------------------------------------------------------------------------- */
+const map = L.map("map").setView(DEFAULT_CENTER, 13);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  attribution: "&copy; OpenStreetMap contributors",
+  maxZoom: 19,
+}).addTo(map);
+
+let detections = [];       // raw records from detections.json
+let markers = [];          // {marker, detection}
+let routeLayers = [];      // polylines currently drawn
+
+function severityColor(sev) {
+  return SEVERITY_COLORS[sev] || "#3388ff";
+}
+
+function clearMarkers() {
+  markers.forEach(m => map.removeLayer(m.marker));
+  markers = [];
+}
+
+function activeFilters() {
+  return {
+    Mild: document.getElementById("filterMild").checked,
+    Moderate: document.getElementById("filterModerate").checked,
+    Severe: document.getElementById("filterSevere").checked,
+  };
+}
+
+function renderMarkers() {
+  clearMarkers();
+  const filters = activeFilters();
+  let anyVisible = false;
+
+  detections.forEach((d, i) => {
+    if (d.latitude == null || d.longitude == null) return;
+    if (!filters[d.severity]) return;
+    anyVisible = true;
+
+    const marker = L.circleMarker([d.latitude, d.longitude], {
+      radius: 8,
+      color: severityColor(d.severity),
+      fillColor: severityColor(d.severity),
+      fillOpacity: 0.85,
+      weight: 2,
+    }).addTo(map);
+
+    marker.bindPopup(
+      `<b>${d.severity || "Unknown"}</b><br>` +
+      `Confidence: ${d.confidence != null ? (d.confidence * 100).toFixed(1) + "%" : "n/a"}<br>` +
+      `Pixel area: ${d.pixel_area != null ? d.pixel_area : (d.mask_coords ? "" : "n/a")}<br>` +
+      `Timestamp: ${d.timestamp != null ? d.timestamp.toFixed(2) + "s" : "n/a"}<br>` +
+      `GPS: ${d.latitude.toFixed(6)}, ${d.longitude.toFixed(6)}`
+    );
+
+    markers.push({ marker, detection: d, index: i });
+  });
+
+  document.getElementById("mapEmptyMsg").style.display =
+    (detections.length === 0) ? "block" : "none";
+
+  if (anyVisible) {
+    const group = L.featureGroup(markers.map(m => m.marker));
+    if (markers.length > 0) map.fitBounds(group.getBounds().pad(0.2));
+  }
+}
+
+function recenterMapOnDetections() {
+  const withGps = detections.filter(d => d.latitude != null && d.longitude != null);
+  if (withGps.length === 0) return;
+  const avgLat = withGps.reduce((s, d) => s + d.latitude, 0) / withGps.length;
+  const avgLon = withGps.reduce((s, d) => s + d.longitude, 0) / withGps.length;
+  map.setView([avgLat, avgLon], 14);
+}
+
+["filterMild", "filterModerate", "filterSevere"].forEach(id =>
+  document.getElementById(id).addEventListener("change", renderMarkers)
+);
+
+/* -------------------------------------------------------------------------
+   Load detections.json from the backend
+   ------------------------------------------------------------------------- */
+async function loadDetections() {
+  const res = await fetch(`${API_BASE}/api/detections`);
+  const data = await res.json();
+  detections = data.detections || [];
+  renderMarkers();
+  recenterMapOnDetections();
+  renderTable();
+}
+document.getElementById("loadDetectionsBtn").addEventListener("click", loadDetections);
+
+/* -------------------------------------------------------------------------
+   Section 1: Video processing
+   ------------------------------------------------------------------------- */
+async function loadModels() {
+  const select = document.getElementById("modelSelect");
+  try {
+    const res = await fetch(`${API_BASE}/api/models`);
+    const data = await res.json();
+    select.innerHTML = "";
+    if (!data.models || data.models.length === 0) {
+      select.innerHTML = "<option value=''>No models found</option>";
+      return;
+    }
+    data.models.forEach(m => {
+      const opt = document.createElement("option");
+      opt.value = m.path;
+      opt.textContent = m.label;
+      select.appendChild(opt);
+    });
+  } catch (e) {
+    select.innerHTML = "<option value=''>Backend not reachable</option>";
+  }
+}
+loadModels();
+
+function appendConsole(line) {
+  const el = document.getElementById("consoleOut");
+  el.textContent += "\n" + line;
+  el.scrollTop = el.scrollHeight;
+}
+
+document.getElementById("processBtn").addEventListener("click", async () => {
+  const videoInput = document.getElementById("videoFile");
+  if (!videoInput.files.length) {
+    alert("Please select a road video first.");
+    return;
+  }
+
+  const btn = document.getElementById("processBtn");
+  btn.disabled = true;
+  document.getElementById("consoleOut").textContent = "Uploading video...";
+  document.getElementById("progressFill").style.width = "0%";
+  document.getElementById("summaryTiles").style.display = "none";
+
+  const form = new FormData();
+  form.append("video", videoInput.files[0]);
+  const gpsInput = document.getElementById("gpsFile");
+  if (gpsInput.files.length) form.append("gps", gpsInput.files[0]);
+  form.append("model_path", document.getElementById("modelSelect").value);
+  form.append("frame_stride", document.getElementById("frameStride").value);
+  form.append("conf_threshold", document.getElementById("confThreshold").value);
+  form.append("append", document.getElementById("appendMode").checked);
+
+  try {
+    const startRes = await fetch(`${API_BASE}/api/process`, { method: "POST", body: form });
+    if (!startRes.ok) throw new Error(`Server returned ${startRes.status}`);
+    const { job_id } = await startRes.json();
+
+    let lastLogLength = 0;
+    const poll = setInterval(async () => {
+      const statusRes = await fetch(`${API_BASE}/api/process/${job_id}/status`);
+      const status = await statusRes.json();
+
+      if (status.log && status.log.length > lastLogLength) {
+        document.getElementById("consoleOut").textContent = status.log.join("\n");
+        document.getElementById("consoleOut").scrollTop = 999999;
+        lastLogLength = status.log.length;
+      }
+      document.getElementById("progressFill").style.width = (status.progress || 0) + "%";
+
+      if (status.status === "done") {
+        clearInterval(poll);
+        btn.disabled = false;
+        const s = status.summary || {};
+        document.getElementById("summaryTiles").style.display = "flex";
+        document.getElementById("sumTotal").textContent = s.total_detections || 0;
+        document.getElementById("sumMild").textContent = (s.breakdown || {}).Mild || 0;
+        document.getElementById("sumModerate").textContent = (s.breakdown || {}).Moderate || 0;
+        document.getElementById("sumSevere").textContent = (s.breakdown || {}).Severe || 0;
+        await loadDetections();
+      } else if (status.status === "error") {
+        clearInterval(poll);
+        btn.disabled = false;
+        appendConsole("Processing failed - see log above.");
+      }
+    }, 1500);
+  } catch (e) {
+    appendConsole("ERROR: " + e.message);
+    btn.disabled = false;
+  }
+});
+
+/* -------------------------------------------------------------------------
+   Section 4: Detections table
+   ------------------------------------------------------------------------- */
+let sortKey = "idx";
+let sortAsc = true;
+
+function renderTable() {
+  const tbody = document.getElementById("detTableBody");
+  tbody.innerHTML = "";
+
+  const rows = detections.map((d, i) => ({ ...d, idx: i }));
+  rows.sort((a, b) => {
+    let av = a[sortKey], bv = b[sortKey];
+    if (av == null) av = "";
+    if (bv == null) bv = "";
+    if (av < bv) return sortAsc ? -1 : 1;
+    if (av > bv) return sortAsc ? 1 : -1;
+    return 0;
+  });
+
+  rows.forEach(d => {
+    const tr = document.createElement("tr");
+    tr.className = "detection-row";
+    tr.innerHTML = `
+      <td>${d.idx + 1}</td>
+      <td>${d.timestamp != null ? d.timestamp.toFixed(2) : "-"}</td>
+      <td>${d.latitude != null ? d.latitude.toFixed(6) : "-"}</td>
+      <td>${d.longitude != null ? d.longitude.toFixed(6) : "-"}</td>
+      <td>${d.severity || "-"}</td>
+      <td>${d.confidence != null ? (d.confidence * 100).toFixed(1) + "%" : "-"}</td>
+      <td>${d.pixel_area != null ? d.pixel_area : "-"}</td>
+    `;
+    tr.addEventListener("click", () => {
+      const found = markers.find(m => m.index === d.idx);
+      if (found) {
+        map.setView(found.marker.getLatLng(), 17);
+        found.marker.openPopup();
+      }
+    });
+    tbody.appendChild(tr);
+  });
+}
+
+document.querySelectorAll("#detTable th").forEach(th => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.key;
+    if (sortKey === key) sortAsc = !sortAsc; else { sortKey = key; sortAsc = true; }
+    renderTable();
+  });
+});
+
+document.getElementById("exportCsvBtn").addEventListener("click", () => {
+  if (detections.length === 0) { alert("No detections to export."); return; }
+  const header = ["#", "Timestamp", "Latitude", "Longitude", "Severity", "Confidence", "Area (px)"];
+  const lines = [header.join(",")];
+  detections.forEach((d, i) => {
+    lines.push([
+      i + 1,
+      d.timestamp ?? "",
+      d.latitude ?? "",
+      d.longitude ?? "",
+      d.severity ?? "",
+      d.confidence ?? "",
+      d.pixel_area ?? "",
+    ].join(","));
+  });
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "detections.csv"; a.click();
+  URL.revokeObjectURL(url);
+});
+
+/* -------------------------------------------------------------------------
+   Section 3: Route planner (OSRM public API - no key needed)
+   ------------------------------------------------------------------------- */
+async function geocodeIfNeeded(text) {
+  const coordMatch = text.match(/^\s*(-?\d+(\.\d+)?)\s*,\s*(-?\d+(\.\d+)?)\s*$/);
+  if (coordMatch) {
+    return [parseFloat(coordMatch[1]), parseFloat(coordMatch[3])];
+  }
+  // Fall back to Nominatim (OSM's public geocoder) for place names
+  const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(text)}`);
+  const data = await res.json();
+  if (!data.length) throw new Error(`Could not find location: ${text}`);
+  return [parseFloat(data[0].lat), parseFloat(data[0].lon)];
+}
+
+function haversineMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function distancePointToSegmentMeters(p, a, b) {
+  // approximate: project in a local flat-earth sense (fine at city scale)
+  const toXY = (pt, origin) => [
+    (pt[1] - origin[1]) * 111320 * Math.cos(origin[0] * Math.PI / 180),
+    (pt[0] - origin[0]) * 110540,
+  ];
+  const [px, py] = toXY(p, a);
+  const [bx, by] = toXY(b, a);
+  const t = Math.max(0, Math.min(1, (px * bx + py * by) / (bx * bx + by * by || 1)));
+  const projX = t * bx, projY = t * by;
+  return Math.sqrt((px - projX) ** 2 + (py - projY) ** 2);
+}
+
+function scoreRoute(coords, severeDetections, moderateDetections) {
+  let severeCount = 0, moderateCount = 0;
+  for (let i = 0; i < coords.length - 1; i++) {
+    const a = coords[i], b = coords[i + 1];
+    severeDetections.forEach(d => {
+      if (distancePointToSegmentMeters([d.latitude, d.longitude], a, b) <= AVOID_RADIUS_METERS) severeCount++;
+    });
+    moderateDetections.forEach(d => {
+      if (distancePointToSegmentMeters([d.latitude, d.longitude], a, b) <= AVOID_RADIUS_METERS) moderateCount++;
+    });
+  }
+  return { severeCount, moderateCount };
+}
+
+async function fetchOsrmRoutes(start, end) {
+  const url = `https://router.project-osrm.org/route/v1/driving/${start[1]},${start[0]};${end[1]},${end[0]}` +
+    `?alternatives=true&overview=full&geometries=geojson`;
+  const res = await fetch(url);
+  const data = await res.json();
+  if (!data.routes || !data.routes.length) throw new Error("OSRM returned no routes");
+  return data.routes;
+}
+
+document.getElementById("findRoutesBtn").addEventListener("click", async () => {
+  const resultsEl = document.getElementById("routeResults");
+  resultsEl.innerHTML = "<p>Finding routes...</p>";
+  routeLayers.forEach(l => map.removeLayer(l));
+  routeLayers = [];
+
+  try {
+    const startText = document.getElementById("routeStart").value.trim();
+    const endText = document.getElementById("routeEnd").value.trim();
+    if (!startText || !endText) throw new Error("Enter both a start and end point.");
+
+    const [start, end] = await Promise.all([geocodeIfNeeded(startText), geocodeIfNeeded(endText)]);
+    const rawRoutes = await fetchOsrmRoutes(start, end);
+
+    const severeDets = detections.filter(d => d.severity === "Severe" && d.latitude != null);
+    const moderateDets = detections.filter(d => d.severity === "Moderate" && d.latitude != null);
+
+    // Take up to 3 alternatives from OSRM, sort shortest-first for "Route 1"
+    const candidates = rawRoutes.slice(0, 3).map(r => {
+      const coords = r.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+      const { severeCount, moderateCount } = scoreRoute(coords, severeDets, moderateDets);
+      return { coords, distanceKm: r.distance / 1000, severeCount, moderateCount };
+    });
+    candidates.sort((a, b) => a.distanceKm - b.distanceKm);
+
+    // Route 2 = fewest severe potholes among candidates (avoidance route)
+    const byAvoidance = [...candidates].sort((a, b) => a.severeCount - b.severeCount);
+
+    const palette = [
+      { color: "#2563eb", label: "Route 1 (shortest)" },
+      { color: "#16a34a", label: "Route 2 (avoids severe potholes)" },
+      { color: "#f59e0b", label: "Route 3 (alternative)" },
+    ];
+
+    // Build the final 3-route set: shortest, best-avoidance (if different), then remaining
+    const finalRoutes = [];
+    finalRoutes.push(candidates[0]);
+    const avoidancePick = byAvoidance.find(r => r !== candidates[0]) || byAvoidance[0];
+    if (avoidancePick && !finalRoutes.includes(avoidancePick)) finalRoutes.push(avoidancePick);
+    candidates.forEach(r => { if (finalRoutes.length < 3 && !finalRoutes.includes(r)) finalRoutes.push(r); });
+
+    resultsEl.innerHTML = "";
+    finalRoutes.forEach((route, i) => {
+      const style = palette[i] || palette[palette.length - 1];
+      const line = L.polyline(route.coords, { color: style.color, weight: 5, opacity: 0.8 }).addTo(map);
+      line.on("click", () => {
+        routeLayers.forEach(l => l.setStyle({ weight: 5, opacity: 0.8 }));
+        line.setStyle({ weight: 8, opacity: 1 });
+        map.fitBounds(line.getBounds());
+      });
+      routeLayers.push(line);
+
+      const card = document.createElement("div");
+      card.className = "route-card";
+      card.innerHTML = `
+        <span class="swatch" style="background:${style.color}"></span><b>${style.label}</b><br>
+        <small>Distance: ${route.distanceKm.toFixed(2)} km &nbsp;|&nbsp;
+        Severe potholes on route: ${route.severeCount} &nbsp;|&nbsp;
+        Moderate potholes on route: ${route.moderateCount}</small>
+      `;
+      card.addEventListener("click", () => {
+        routeLayers.forEach(l => l.setStyle({ weight: 5, opacity: 0.8 }));
+        line.setStyle({ weight: 8, opacity: 1 });
+        map.fitBounds(line.getBounds());
+      });
+      resultsEl.appendChild(card);
+    });
+
+    map.fitBounds(L.featureGroup(routeLayers).getBounds().pad(0.1));
+  } catch (e) {
+    resultsEl.innerHTML = `<p style="color:var(--severe)">Error: ${e.message}</p>`;
+  }
+});
+
+/* -------------------------------------------------------------------------
+   Initial load
+   ------------------------------------------------------------------------- */
+loadDetections();
+</script>
+</body>
+</html>
