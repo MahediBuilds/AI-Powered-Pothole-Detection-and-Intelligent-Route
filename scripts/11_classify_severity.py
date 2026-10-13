@@ -6,9 +6,12 @@ extra geometric features and a severity label added to every detection.
 The input file is never modified.
 
 Features computed per detection:
-  1. Pixel area       - reused from mask_area_px (already computed at
-                         inference time from the smoothed mask), not
-                         recomputed here.
+  1. Area fraction    - mask_area_px (already computed at inference time
+                         from the smoothed mask) divided by the frame's
+                         image_width * image_height, so the same pothole
+                         gets the same bucket whether the video is 720p,
+                         1080x1080 or 4K. Raw pixel area is still written
+                         out as pixel_area for display.
   2. Circularity      - perimeter^2 / area, from the detection's polygon
                          contour via cv2.arcLength. Higher = more jagged /
                          fractured edge = worse damage.
@@ -32,11 +35,20 @@ space, not model input space) - 33 of 34 detections were classified
 Severe, which does not discriminate. The area thresholds below are set at
 the 33rd/67th percentile of the measured mask_area_px distribution from
 that run (33rd pct ~= 307,971 px, 67th pct ~= 520,499 px), giving a roughly
-even three-way split on the observed sample. Circularity and aspect-ratio
+even three-way split on the observed sample. They are stored as fractions
+of the 1080x1080 frame those pixel counts were measured on (308,000 and
+520,000 px out of 1,166,400 ~= 0.264 and 0.446), which gives exactly
+the same result on 1080x1080 frames but no longer pushes every detection
+into "Severe" on higher-resolution video. Circularity and aspect-ratio
 were left close to the original spec values, since the dry run showed the
 old cutoffs (25, 2.5) already sit near the median/75th-percentile of the
 observed distribution and discriminate reasonably well as-is; both were
 nudged slightly to better match the measured 75th percentile.
+
+Area as a fraction of the frame still depends on how far the pothole is
+from the camera (a dashcam sees the road at an angle). Converting pixels to
+real road-surface area needs a per-camera ground-plane calibration, which
+this repo does not have.
 
 Caveat: this is a same-source-as-original-spec heuristic recalibration
 against N=34 detections drawn from GT-overlay images (the dataset itself
@@ -63,19 +75,33 @@ import config
 # Thresholds - kept as named constants so they're easy to find and adjust.
 # ---------------------------------------------------------------------------
 THRESHOLDS = {
-    "area_small_max": 308000,     # px: area < this -> "small" (33rd pct of dry-run sample, N=34)
-    "area_medium_max": 520000,    # px: small..this -> "medium", above -> "large" (67th pct)
+    "area_frac_small_max": 308000 / (1080 * 1080),   # ~0.264 of the frame: below -> "small" (33rd pct of dry-run sample, N=34)
+    "area_frac_medium_max": 520000 / (1080 * 1080),  # ~0.446: small..this -> "medium", above -> "large" (67th pct)
     "circularity_irregular": 30,  # perimeter^2/area above this -> "irregular" (~median-to-75th pct)
     "aspect_ratio_elongated": 2.2,  # max(w,h)/min(w,h) above this -> "elongated" (~75th pct)
 }
 
+# Frame size assumed for predictions.json files written before
+# 09_infer_seg.py recorded image_width/image_height (the dataset's 1080x1080
+# frames, which the thresholds above were measured on).
+LEGACY_FRAME_SIZE = (1080, 1080)
 
-def bucket_area(area_px):
-    if area_px < THRESHOLDS["area_small_max"]:
+
+def bucket_area(area_fraction):
+    if area_fraction < THRESHOLDS["area_frac_small_max"]:
         return "small"
-    if area_px <= THRESHOLDS["area_medium_max"]:
+    if area_fraction <= THRESHOLDS["area_frac_medium_max"]:
         return "medium"
     return "large"
+
+
+def compute_area_fraction(det):
+    """Mask area as a fraction of the frame. Returns (fraction, used_legacy_size)."""
+    width, height = det.get("image_width"), det.get("image_height")
+    used_legacy = not (width and height)
+    if used_legacy:
+        width, height = LEGACY_FRAME_SIZE
+    return det.get("mask_area_px", 0) / (width * height), used_legacy
 
 
 def compute_circularity(polygon):
@@ -110,24 +136,34 @@ def process(detections):
           f"(thresholds: {THRESHOLDS})")
 
     counts = {"Mild": 0, "Moderate": 0, "Severe": 0}
+    legacy_size_count = 0
 
     for det in detections:
         pixel_area = det.get("mask_area_px", 0)
+        area_fraction, used_legacy = compute_area_fraction(det)
+        legacy_size_count += used_legacy
         circularity = compute_circularity(det.get("polygon"))
         aspect_ratio = compute_aspect_ratio(det["bbox_xyxy"])
 
-        area_bucket = bucket_area(pixel_area)
+        area_bucket = bucket_area(area_fraction)
         is_irregular = circularity > THRESHOLDS["circularity_irregular"]
         is_elongated = aspect_ratio > THRESHOLDS["aspect_ratio_elongated"]
 
         severity = classify(area_bucket, is_irregular or is_elongated)
 
         det["pixel_area"] = pixel_area
+        det["area_fraction"] = round(area_fraction, 5)
         det["circularity"] = round(circularity, 3)
         det["aspect_ratio"] = round(aspect_ratio, 3)
         det["severity"] = severity
 
         counts[severity] += 1
+
+    if legacy_size_count:
+        print(f"[WARN] {legacy_size_count} detection(s) have no image_width/image_height "
+              f"(predictions.json from an older 09_infer_seg.py) - assumed a "
+              f"{LEGACY_FRAME_SIZE[0]}x{LEGACY_FRAME_SIZE[1]} frame. Re-run 09_infer_seg.py "
+              f"for correct area buckets on other resolutions.")
 
     print(f"Done. Breakdown -> Mild: {counts['Mild']}, "
           f"Moderate: {counts['Moderate']}, Severe: {counts['Severe']}")

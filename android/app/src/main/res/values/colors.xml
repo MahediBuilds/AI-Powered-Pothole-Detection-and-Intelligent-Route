@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="brand">#2563EB</color>
+    <color name="icon_background">#1A1D23</color>
+    <color name="record_red">#E53935</color>
+    <color name="gps_good">#43A047</color>
+    <color name="gps_warn">#FB8C00</color>
+    <color name="gps_bad">#E53935</color>
+    <color name="hud_background">#99000000</color>
+    <color name="hud_text">#FFFFFFFF</color>
+</resources>

@@ -1,3 +1,18 @@
 /dataset
 /venv
-/__pycache__
+
+# Python bytecode, in any folder
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Model weights are too large for git - see "Model weights" in README.md
+*.pt
+*.onnx
+*.torchscript
+
+# Generated at runtime
+/uploads/
+/models/
+/local_finetune/
+/results/detections.json

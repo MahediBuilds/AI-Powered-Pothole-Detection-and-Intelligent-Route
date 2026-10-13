@@ -1,6 +1,5 @@
-path: C:\Users\zainm\Major Project\AI-Powered-Pothole-Detection-and-Intelligent-Route\dataset\final
-train: images/train
-val: images/val
-test: images/test
+train: dataset/final/images/train
+val: dataset/final/images/val
+test: dataset/final/images/test
 names:
   0: pothole

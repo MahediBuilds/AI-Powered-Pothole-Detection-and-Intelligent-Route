@@ -191,6 +191,21 @@
   }
   .route-card small { color: var(--muted); }
   .swatch { display:inline-block; width:12px; height:12px; border-radius:3px; margin-right:6px; vertical-align:middle; }
+
+  #framePreview { display: none; margin-bottom: 12px; }
+  #framePreview img { width: 100%; max-height: 520px; object-fit: contain; border-radius: 10px; background: #000; }
+  #framePreview .caption { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .thumb {
+    border: 2px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    cursor: pointer;
+    background: var(--bg);
+  }
+  .thumb.selected { border-color: var(--accent); }
+  .thumb img { width: 100%; aspect-ratio: 1 / 1; object-fit: cover; display: block; }
+  .thumb .meta { font-size: 12px; padding: 6px 8px; display: flex; justify-content: space-between; gap: 6px; }
 </style>
 </head>
 <body>
@@ -271,6 +286,17 @@
     </div>
   </section>
 
+  <!-- ================= DETECTED FRAMES ================= -->
+  <section class="panel full-width">
+    <h2>Detected Frames</h2>
+    <div id="framePreview">
+      <img id="framePreviewImg" alt="Annotated frame" />
+      <div class="caption" id="framePreviewCaption"></div>
+    </div>
+    <div class="gallery" id="gallery"></div>
+    <div id="galleryEmptyMsg" class="empty-msg">No detected frames yet. Process a video to see annotated frames here.</div>
+  </section>
+
   <!-- ================= SECTION 4: DETECTIONS TABLE ================= -->
   <section class="panel full-width">
     <h2>4. Detections Table</h2>
@@ -297,6 +323,7 @@
 
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
+<script src="/ui/route_scoring.js"></script>
 <script>
 "use strict";
 
@@ -384,8 +411,18 @@ function renderMarkers() {
     markers.push({ marker, detection: d, index: i });
   });
 
-  document.getElementById("mapEmptyMsg").style.display =
-    (detections.length === 0) ? "block" : "none";
+  const emptyMsg = document.getElementById("mapEmptyMsg");
+  const withGps = detections.filter(d => d.latitude != null && d.longitude != null).length;
+  if (detections.length === 0) {
+    emptyMsg.textContent = 'No detections loaded yet. Process a video, or click "Load detections.json".';
+    emptyMsg.style.display = "block";
+  } else if (withGps === 0) {
+    emptyMsg.textContent = `${detections.length} detection(s) found, but none have GPS coordinates, so they can't be placed on the map. ` +
+      "Upload a GPS log (CSV: timestamp_sec,lat,lon) with the video. The detected frames are shown below.";
+    emptyMsg.style.display = "block";
+  } else {
+    emptyMsg.style.display = "none";
+  }
 
   if (anyVisible) {
     const group = L.featureGroup(markers.map(m => m.marker));
@@ -415,6 +452,66 @@ async function loadDetections() {
   renderMarkers();
   recenterMapOnDetections();
   renderTable();
+  renderGallery();
+}
+
+/* -------------------------------------------------------------------------
+   Detected frames gallery (works with or without GPS)
+   ------------------------------------------------------------------------- */
+const SEVERITY_RANK = { Mild: 1, Moderate: 2, Severe: 3 };
+
+function frameGroups() {
+  // One entry per annotated frame; a frame can hold several detections.
+  const groups = new Map();
+  detections.forEach((d, i) => {
+    if (!d.image_url) return;
+    if (!groups.has(d.image_url)) groups.set(d.image_url, { url: d.image_url, items: [] });
+    groups.get(d.image_url).items.push({ ...d, idx: i });
+  });
+  return [...groups.values()];
+}
+
+function showFrame(url) {
+  const group = frameGroups().find(g => g.url === url);
+  if (!group) return;
+  document.getElementById("framePreview").style.display = "block";
+  document.getElementById("framePreviewImg").src = url;
+  const parts = group.items.map(d =>
+    `#${d.idx + 1} ${d.severity || "?"} (${(d.confidence * 100).toFixed(1)}%)`);
+  const ts = group.items[0].timestamp;
+  document.getElementById("framePreviewCaption").textContent =
+    `${group.items[0].frame}${ts != null ? " @ " + ts.toFixed(2) + "s" : ""} — ${parts.join(", ")}`;
+  document.querySelectorAll(".thumb").forEach(t =>
+    t.classList.toggle("selected", t.dataset.url === url));
+}
+
+function renderGallery() {
+  const gallery = document.getElementById("gallery");
+  gallery.innerHTML = "";
+  const groups = frameGroups();
+  document.getElementById("galleryEmptyMsg").style.display = groups.length ? "none" : "block";
+  if (!groups.length) {
+    document.getElementById("framePreview").style.display = "none";
+    return;
+  }
+
+  groups.forEach(g => {
+    const worst = g.items.reduce((a, b) =>
+      (SEVERITY_RANK[b.severity] || 0) > (SEVERITY_RANK[a.severity] || 0) ? b : a);
+    const div = document.createElement("div");
+    div.className = "thumb";
+    div.dataset.url = g.url;
+    div.innerHTML = `
+      <img src="${g.url}" loading="lazy" alt="${worst.frame}" />
+      <div class="meta">
+        <span><span class="dot" style="background:${severityColor(worst.severity)}"></span> ${worst.severity || "?"}</span>
+        <span>${g.items.length} pothole${g.items.length > 1 ? "s" : ""}</span>
+      </div>`;
+    div.addEventListener("click", () => showFrame(g.url));
+    gallery.appendChild(div);
+  });
+
+  showFrame(groups[0].url);
 }
 document.getElementById("loadDetectionsBtn").addEventListener("click", loadDetections);
 
@@ -548,6 +645,10 @@ function renderTable() {
         map.setView(found.marker.getLatLng(), 17);
         found.marker.openPopup();
       }
+      if (d.image_url) {
+        showFrame(d.image_url);
+        document.getElementById("framePreview").scrollIntoView({ behavior: "smooth", block: "center" });
+      }
     });
     tbody.appendChild(tr);
   });
@@ -608,32 +709,7 @@ function haversineMeters(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function distancePointToSegmentMeters(p, a, b) {
-  // approximate: project in a local flat-earth sense (fine at city scale)
-  const toXY = (pt, origin) => [
-    (pt[1] - origin[1]) * 111320 * Math.cos(origin[0] * Math.PI / 180),
-    (pt[0] - origin[0]) * 110540,
-  ];
-  const [px, py] = toXY(p, a);
-  const [bx, by] = toXY(b, a);
-  const t = Math.max(0, Math.min(1, (px * bx + py * by) / (bx * bx + by * by || 1)));
-  const projX = t * bx, projY = t * by;
-  return Math.sqrt((px - projX) ** 2 + (py - projY) ** 2);
-}
-
-function scoreRoute(coords, severeDetections, moderateDetections) {
-  let severeCount = 0, moderateCount = 0;
-  for (let i = 0; i < coords.length - 1; i++) {
-    const a = coords[i], b = coords[i + 1];
-    severeDetections.forEach(d => {
-      if (distancePointToSegmentMeters([d.latitude, d.longitude], a, b) <= AVOID_RADIUS_METERS) severeCount++;
-    });
-    moderateDetections.forEach(d => {
-      if (distancePointToSegmentMeters([d.latitude, d.longitude], a, b) <= AVOID_RADIUS_METERS) moderateCount++;
-    });
-  }
-  return { severeCount, moderateCount };
-}
+// distancePointToSegmentMeters / scoreRoute live in ui/route_scoring.js
 
 async function fetchOsrmRoutes(start, end) {
   const url = `https://router.project-osrm.org/route/v1/driving/${start[1]},${start[0]};${end[1]},${end[0]}` +
@@ -664,7 +740,7 @@ document.getElementById("findRoutesBtn").addEventListener("click", async () => {
     // Take up to 3 alternatives from OSRM, sort shortest-first for "Route 1"
     const candidates = rawRoutes.slice(0, 3).map(r => {
       const coords = r.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
-      const { severeCount, moderateCount } = scoreRoute(coords, severeDets, moderateDets);
+      const { severeCount, moderateCount } = scoreRoute(coords, severeDets, moderateDets, AVOID_RADIUS_METERS);
       return { coords, distanceKm: r.distance / 1000, severeCount, moderateCount };
     });
     candidates.sort((a, b) => a.distanceKm - b.distanceKm);

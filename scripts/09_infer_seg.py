@@ -8,11 +8,27 @@ Post-processing applied on top of raw Ultralytics predictions:
   - Optional test-time augmentation via --tta (Ultralytics' built-in
     augmented inference)
 
+Masks are predicted with retina_masks=True, so they come back at the
+original frame resolution. An earlier version resized the model-resolution
+mask straight to the frame size, which is only correct for square frames:
+for e.g. a 1920x1080 dashcam frame the model input is a letterboxed 640x384,
+and stretching that (padding included) shifted the mask and skewed its area.
+
 Output: for every input image, an overlay jpg plus a row in
-predictions.json with bbox, confidence, polygon and (if a geotag log is
-supplied via --geotag) interpolated lat/lon. Without --geotag, lat/lon are
-simply null - this is the extension point for the route-mapping feature,
-not a required input right now.
+predictions.json with bbox, confidence, polygon, frame size and (if a
+geotag log is supplied via --geotag) interpolated lat/lon. Without
+--geotag, lat/lon are simply null - this is the extension point for the
+route-mapping feature, not a required input right now.
+
+Tracking (--track): consecutive frames of a video see the same pothole
+several times. With --track, frames are run through Ultralytics' ByteTrack
+tracker in filename order and every detection gets a track_id, which
+12_build_detections.py uses to collapse each physical pothole to a single
+record. Only detections that belong to a confirmed track are kept, so a
+pothole has to appear in at least two sampled frames to be reported (except
+in the first frame of a video). The tracker is reset whenever source_video
+changes, so pass --frames-meta when --source mixes frames from several
+videos; without it, all images are treated as one continuous video.
 
 Geotagging here requires a real per-frame timestamp, which this script
 does not know on its own - it only sees a directory of already-extracted
@@ -27,7 +43,6 @@ differed from 30 or frames had been extracted at a stride > 1.
 """
 
 import argparse
-import csv
 import json
 import sys
 from pathlib import Path
@@ -39,11 +54,17 @@ from ultralytics import YOLO
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
+from utils.frames import load_frames_meta
 from utils.geo import load_geotag_log, interpolate_position
 
 _SMOOTH_KERNEL = cv2.getStructuringElement(
     cv2.MORPH_ELLIPSE, (config.MASK_SMOOTH_KERNEL, config.MASK_SMOOTH_KERNEL)
 )
+
+# ByteTrack matches low-confidence detections in a second stage, so with
+# --track it is fed detections down to this confidence; rows below --conf
+# are dropped after tracking.
+TRACK_DETECTION_CONF = 0.1
 
 
 def smooth_mask(mask_uint8):
@@ -60,62 +81,73 @@ def mask_to_polygon(mask_uint8):
     return largest.reshape(-1, 2).tolist()
 
 
-def load_frame_timestamps(frames_meta_path):
-    """Load {filename: timestamp_sec} from a frames_meta.csv, if given.
-
-    Same lookup 12_build_detections.py uses - kept local here (rather than
-    imported) so this script has no dependency on that one.
-    """
-    if frames_meta_path is None:
-        return {}
-
-    path = Path(frames_meta_path)
-    if not path.exists():
-        print(f"[WARN] --frames-meta path not found: {path}")
-        return {}
-
-    lookup = {}
-    with open(path, newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            try:
-                lookup[row["filename"]] = float(row["timestamp_sec"])
-            except (KeyError, ValueError):
-                continue
-    return lookup
+def reset_tracker(model):
+    for tracker in getattr(model.predictor, "trackers", None) or []:
+        tracker.reset()
 
 
-def run(model, image_paths, args, geotag_log, video_stem, frame_timestamps):
+def predict_frame(model, img_path, args, device):
+    kwargs = dict(
+        source=str(img_path),
+        iou=args.iou,
+        imgsz=args.imgsz,
+        device=device,
+        augment=args.tta,
+        retina_masks=True,
+        verbose=False,
+    )
+    if args.track:
+        return model.track(conf=min(args.conf, TRACK_DETECTION_CONF), persist=True,
+                           tracker=args.tracker, **kwargs)[0]
+    return model.predict(conf=args.conf, **kwargs)[0]
+
+
+def run(model, image_paths, args, geotag_log, default_video, frames_meta):
     results_out = []
+    unconfirmed = 0
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     device = 0 if torch.cuda.is_available() else "cpu"
+    prev_video = None
 
-    for idx, img_path in enumerate(image_paths):
+    for img_path in image_paths:
+        meta = frames_meta.get(img_path.name, {})
+        video = meta.get("source_video") or default_video
+        if args.track and video != prev_video:
+            reset_tracker(model)
+        prev_video = video
+
         img = cv2.imread(str(img_path))
         if img is None:
             print(f"[WARN] unreadable image, skipping: {img_path}")
             continue
 
-        results = model.predict(
-            source=str(img_path),
-            conf=args.conf,
-            iou=args.iou,
-            imgsz=args.imgsz,
-            device=device,
-            augment=args.tta,
-            verbose=False,
-        )[0]
+        results = predict_frame(model, img_path, args, device)
 
         overlay = img.copy()
         detections = []
 
         if results.masks is not None:
             h, w = img.shape[:2]
-            for mask_t, box, conf in zip(results.masks.data, results.boxes.xyxy, results.boxes.conf):
+            track_ids = results.boxes.id
+            if args.track and track_ids is None:
+                # The tracker confirmed nothing in this frame, in which case
+                # Ultralytics returns the raw untracked detections - skip them.
+                unconfirmed += sum(float(c) >= args.conf for c in results.boxes.conf)
+                track_ids = []
+            elif track_ids is None:
+                track_ids = [None] * len(results.boxes)
+
+            for mask_t, box, conf, track_id in zip(
+                results.masks.data, results.boxes.xyxy, results.boxes.conf, track_ids
+            ):
+                if float(conf) < args.conf:
+                    continue
+
                 mask = mask_t.cpu().numpy().astype("uint8") * 255
-                mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+                if mask.shape != (h, w):
+                    mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
                 mask = smooth_mask(mask)
 
                 area = int(np.count_nonzero(mask))
@@ -130,7 +162,7 @@ def run(model, image_paths, args, geotag_log, video_stem, frame_timestamps):
 
                 lat, lon = (None, None)
                 if geotag_log:
-                    timestamp_sec = frame_timestamps.get(img_path.name)
+                    timestamp_sec = meta.get("timestamp_sec")
                     if timestamp_sec is not None:
                         lat, lon = interpolate_position(timestamp_sec, geotag_log)
                     # else: no real timestamp known for this frame (no
@@ -139,19 +171,32 @@ def run(model, image_paths, args, geotag_log, video_stem, frame_timestamps):
 
                 detections.append({
                     "frame": img_path.name,
-                    "source_video": video_stem,
+                    "source_video": video,
+                    "track_id": int(track_id) if track_id is not None else None,
                     "confidence": float(conf),
                     "bbox_xyxy": [float(v) for v in box.tolist()],
                     "mask_area_px": area,
+                    "image_width": w,
+                    "image_height": h,
                     "polygon": polygon,
                     "lat": lat,
                     "lon": lon,
                 })
 
         blended = cv2.addWeighted(overlay, 0.4, img, 0.6, 0)
+        # Solid outline + confidence label on top of the translucent fill
+        for det in detections:
+            pts = np.array(det["polygon"], dtype="int32")
+            cv2.polylines(blended, [pts], True, (0, 255, 0), 3)
+            x1, y1 = int(det["bbox_xyxy"][0]), int(det["bbox_xyxy"][1])
+            label, org = f"pothole {det['confidence']:.2f}", (x1 + 4, max(y1 - 8, 30))
+            cv2.putText(blended, label, org, cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 5, cv2.LINE_AA)
+            cv2.putText(blended, label, org, cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
         cv2.imwrite(str(out_dir / img_path.name), blended)
         results_out.extend(detections)
 
+    if args.track:
+        print(f"Tracking: skipped {unconfirmed} detection(s) the tracker had not confirmed yet.")
     return results_out
 
 
@@ -164,6 +209,13 @@ def main():
     parser.add_argument("--conf", type=float, default=config.CONF_THRESHOLD)
     parser.add_argument("--iou", type=float, default=config.IOU_THRESHOLD)
     parser.add_argument("--tta", action="store_true", help="Enable test-time augmentation")
+    parser.add_argument(
+        "--track",
+        action="store_true",
+        help="Treat --source as video frames (in filename order) and give each detection a "
+             "track_id, so 12_build_detections.py can count each pothole once",
+    )
+    parser.add_argument("--tracker", default="bytetrack.yaml", help="Ultralytics tracker config used with --track")
     parser.add_argument("--geotag", default=None, help="Optional CSV: timestamp_sec,lat,lon")
     parser.add_argument(
         "--frames-meta",
@@ -171,10 +223,12 @@ def main():
         help=(
             "Path to the frames_meta.csv written by 02_extract_frames.py "
             "(or app.py's single-video extraction), mapping each frame "
-            "filename to its real timestamp_sec. Required for --geotag to "
-            "do anything - without it, lat/lon stay null even if --geotag "
-            "is given, since there is no reliable way to know a frame's "
-            "real timestamp from its filename or position alone."
+            "filename to its source video and real timestamp_sec. Required "
+            "for --geotag to do anything - without it, lat/lon stay null "
+            "even if --geotag is given, since there is no reliable way to "
+            "know a frame's real timestamp from its filename or position "
+            "alone. With --track it also tells the tracker where one video "
+            "ends and the next begins."
         ),
     )
     args = parser.parse_args()
@@ -192,18 +246,21 @@ def main():
     if args.geotag and not geotag_log:
         print(f"[WARN] --geotag given but no rows loaded from {args.geotag}")
 
-    frame_timestamps = load_frame_timestamps(args.frames_meta)
-    if args.geotag and not frame_timestamps:
+    frames_meta = load_frames_meta(args.frames_meta)
+    if args.geotag and not frames_meta:
         print(
             "[WARN] --geotag given but no --frames-meta (or it was empty) - "
             "lat/lon will be null for every detection, since there is no "
             "real per-frame timestamp to interpolate against."
         )
+    if args.track and not frames_meta:
+        print("[WARN] --track without --frames-meta - treating every image in --source as one continuous video.")
 
     model = YOLO(str(weights_path))
 
-    print(f"Running inference on {len(image_paths)} images (conf={args.conf}, iou={args.iou}, tta={args.tta})")
-    detections = run(model, image_paths, args, geotag_log, video_stem=source_dir.name, frame_timestamps=frame_timestamps)
+    print(f"Running inference on {len(image_paths)} images "
+          f"(conf={args.conf}, iou={args.iou}, tta={args.tta}, track={args.track})")
+    detections = run(model, image_paths, args, geotag_log, default_video=source_dir.name, frames_meta=frames_meta)
 
     out_json = Path(args.output) / "predictions.json"
     with open(out_json, "w") as f:

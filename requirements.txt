@@ -36,10 +36,13 @@ ultralytics-thop==2.0.20
 urllib3==2.7.0
 
 # needed for scripts/10_export_model.py (ONNX export)
-onnx
-onnxslim
+onnx==1.22.0
+onnxslim==0.1.95
 
 # needed for app.py (Part 4 UI backend)
-fastapi
-uvicorn
-python-multipart
+fastapi==0.143.0
+uvicorn==0.54.0
+python-multipart==0.0.32
+
+# needed to run the test suite (tests/)
+pytest==9.1.1

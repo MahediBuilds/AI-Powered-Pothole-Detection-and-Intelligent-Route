@@ -4,8 +4,8 @@ This is a thin orchestration layer only - it does not reimplement any
 detection/severity/geotag logic. It saves uploaded files, then runs the
 existing pipeline as subprocesses in a background thread:
 
-  frame extraction (inline, single-video version of scripts/02_extract_frames.py)
-        -> scripts/09_infer_seg.py
+  frame extraction (utils/frames.py, single-video, no mask stream)
+        -> scripts/09_infer_seg.py --track
         -> scripts/11_classify_severity.py
         -> scripts/12_build_detections.py
 
@@ -18,7 +18,6 @@ Then open http://localhost:8000 in a browser.
 All paths are variables at the top so they're easy to change.
 """
 
-import csv
 import json
 import subprocess
 import sys
@@ -27,12 +26,12 @@ import time
 import uuid
 from pathlib import Path
 
-import cv2
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 import config
+from utils.frames import FRAMES_META_NAME, extract_frames
 
 # ---------------------------------------------------------------------------
 # Paths - change these if your layout differs
@@ -70,16 +69,19 @@ def serve_index():
 # ---------------------------------------------------------------------------
 @app.get("/api/models")
 def list_models():
+    # Pothole-trained models first so the dropdown defaults to one. The root
+    # *.pt files are untrained COCO base weights (yolo26n.pt is detect-only,
+    # no masks) and will not find potholes - listed last for completeness.
     found = []
 
-    for p in sorted(ROOT.glob("*.pt")):
-        found.append({"label": f"base: {p.name}", "path": str(p)})
+    for p in sorted(ROOT.glob("runs/*/weights/best.pt")):
+        found.append({"label": f"trained: {p.parent.parent.name}", "path": str(p)})
 
     for p in sorted(MODELS_DIR.glob("*.pt")):
         found.append({"label": f"fine-tuned: {p.name}", "path": str(p)})
 
-    for p in sorted(ROOT.glob("runs/*/weights/best.pt")):
-        found.append({"label": f"trained: {p.parent.parent.name}", "path": str(p)})
+    for p in sorted(ROOT.glob("*.pt")):
+        found.append({"label": f"base (COCO, not pothole-trained): {p.name}", "path": str(p)})
 
     return {"models": found}
 
@@ -109,39 +111,13 @@ def extract_frames_single_video(video_path, out_dir, stride, job_id):
     paired mask stream, unlike the training pipeline's 02_extract_frames.py).
     Writes a frames_meta.csv with the same columns 12_build_detections.py
     already knows how to read."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Could not open video: {video_path}")
+    def on_frame(frame_idx, total):
+        JOBS[job_id]["progress"] = min(30, int(30 * frame_idx / max(total, 1)))
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    saved, fps, total = extract_frames(video_path, out_dir, stride, config.JPEG_QUALITY, on_frame=on_frame)
     log(job_id, f"Video opened: fps={fps:.2f}, total_frames={total}, stride={stride}")
-
-    meta_path = out_dir / "frames_meta.csv"
-    saved = 0
-    frame_idx = 0
-    with open(meta_path, "w", newline="") as meta_file:
-        writer = csv.writer(meta_file)
-        writer.writerow(["filename", "source_video", "frame_index", "timestamp_sec", "lat", "lon"])
-
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            if frame_idx % stride == 0:
-                fname = f"frame_{frame_idx:06d}.jpg"
-                cv2.imwrite(str(out_dir / fname), frame, [cv2.IMWRITE_JPEG_QUALITY, config.JPEG_QUALITY])
-                timestamp_sec = frame_idx / fps
-                writer.writerow([fname, video_path.stem, frame_idx, f"{timestamp_sec:.3f}", "", ""])
-                saved += 1
-                if saved % 20 == 0:
-                    JOBS[job_id]["progress"] = min(30, int(30 * frame_idx / max(total, 1)))
-            frame_idx += 1
-
-    cap.release()
-    log(job_id, f"Extracted {saved} frames -> {out_dir}")
-    return saved
+    log(job_id, f"Extracted {len(saved)} frames -> {out_dir}")
+    return len(saved)
 
 
 def run_subprocess(cmd, job_id):
@@ -177,9 +153,11 @@ def process_job(job_id, video_path, gps_path, model_path, frame_stride, conf_thr
             "--source", str(frames_dir),
             "--output", str(inference_dir),
             "--conf", str(conf_threshold),
+            "--track",
+            "--frames-meta", str(frames_dir / FRAMES_META_NAME),
         ]
         if gps_path:
-            cmd += ["--geotag", str(gps_path), "--frames-meta", str(frames_dir / "frames_meta.csv")]
+            cmd += ["--geotag", str(gps_path)]
         run_subprocess(cmd, job_id)
         JOBS[job_id]["progress"] = 60
 
@@ -196,8 +174,9 @@ def process_job(job_id, video_path, gps_path, model_path, frame_stride, conf_thr
         build_cmd = [
             sys.executable, str(SCRIPTS_DIR / "12_build_detections.py"),
             "--predictions", str(severity_path),
-            "--frames-meta", str(frames_dir / "frames_meta.csv"),
+            "--frames-meta", str(frames_dir / FRAMES_META_NAME),
             "--output", str(DETECTIONS_JSON),
+            "--image-url-prefix", f"/uploads/{job_id}/inference/",
         ]
         if gps_path:
             build_cmd += ["--geotag", str(gps_path)]
@@ -271,3 +250,6 @@ def job_status(job_id: str):
 # Serve the ui/ folder (in case index.html references other static assets later)
 if UI_DIR.exists():
     app.mount("/ui", StaticFiles(directory=str(UI_DIR)), name="ui")
+
+# Serve job outputs so the UI can display annotated overlay frames
+app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
